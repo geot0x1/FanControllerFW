@@ -89,9 +89,3 @@ Default thermal thresholds (in `Application/config/config.h`):
 | `CONFIG_TEMP_THROTTLE_ON` | 40°C | PWM throttle engages |
 | `CONFIG_TEMP_CRITICAL` | 60°C | Overheat protection |
 
-## Safety Notes
-
-See [FIRMWARE_AUDIT.md](FIRMWARE_AUDIT.md) for known issues and safety considerations. Critical items include:
-
-- **Critical #9**: `SystemFault` kills fans — fail-unsafe cooling on sensor loss
-- **High #8**: No hysteresis on fault recovery (fan oscillation risk)
