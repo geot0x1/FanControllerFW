@@ -299,7 +299,6 @@ class SerialMonitorUI(QMainWindow):
         row = self._add_firmware_version_row(grid, row)
         row = self._add_action_buttons_compact(grid, row)
         row = self._add_info_display_row(grid, row)
-        grid.setRowStretch(row, 1)
 
         contents.setLayout(grid)
 
@@ -368,8 +367,10 @@ class SerialMonitorUI(QMainWindow):
         self.info_display = QTextEdit()
         self.info_display.setReadOnly(True)
         self.info_display.setFont(QFont("Consolas", 8))
-        self.info_display.setFixedHeight(220)
+        self.info_display.setMinimumHeight(120)
+        self.info_display.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         grid.addWidget(self.info_display, row, 0, 1, 3)
+        grid.setRowStretch(row, 1)
         row += 1
 
         return row
