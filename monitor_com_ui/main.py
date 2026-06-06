@@ -11,16 +11,17 @@ The refactored code is split into modules for better maintainability:
   - config.py: Application configuration constants
 """
 
+import os
 import sys
 import serial.tools.list_ports
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QTextEdit, QPushButton, QComboBox, QLabel, QStatusBar,
     QFrame, QCheckBox, QGridLayout, QLineEdit, QScrollArea, QTableWidget, QTableWidgetItem,
-    QMessageBox, QSizePolicy
+    QMessageBox, QSizePolicy, QFileDialog
 )
 from PyQt6.QtGui import QIntValidator, QColor, QFont
-from PyQt6.QtCore import QDateTime, QTimer, Qt
+from PyQt6.QtCore import QDateTime, QTimer, Qt, QProcess
 
 try:
     from .config import UIConfig, DeviceConfig
@@ -85,6 +86,7 @@ class SerialMonitorUI(QMainWindow):
         self.graph_view = None
         self.accumulated_settings = {}
         self._connection_widgets = []
+        self._flash_process = None
 
         self.find_ports_timer = QTimer()
         self.find_ports_timer.timeout.connect(self.update_port_list)
@@ -119,6 +121,7 @@ class SerialMonitorUI(QMainWindow):
         left_layout.setSpacing(6)
 
         left_layout.addLayout(self._build_connection_bar())
+        left_layout.addLayout(self._build_programming_bar())
         left_layout.addWidget(self._build_tabs())
         left_layout.addLayout(self._build_command_bar())
 
@@ -149,6 +152,27 @@ class SerialMonitorUI(QMainWindow):
         self.status_label = QLabel("● Disconnected")
         self.status_label.setStyleSheet("color: #e05555; font-weight: bold; letter-spacing: 0.5px;")
         layout.addWidget(self.status_label)
+
+        return layout
+
+    def _build_programming_bar(self):
+        layout = QHBoxLayout()
+        layout.addWidget(QLabel("Firmware:"))
+
+        self.elf_path_input = QLineEdit()
+        self.elf_path_input.setReadOnly(True)
+        self.elf_path_input.setPlaceholderText("Select ELF file...")
+        layout.addWidget(self.elf_path_input)
+
+        self.browse_btn = QPushButton("Browse")
+        self.browse_btn.clicked.connect(self.browse_elf_file)
+        layout.addWidget(self.browse_btn)
+
+        self.program_btn = QPushButton("Program")
+        self.program_btn.setStyleSheet(_STYLE_BTN_GREEN)
+        self.program_btn.setEnabled(False)
+        self.program_btn.clicked.connect(self.program_device)
+        layout.addWidget(self.program_btn)
 
         return layout
 
@@ -207,7 +231,7 @@ class SerialMonitorUI(QMainWindow):
     def _build_right_panel(self):
         panel = QFrame()
         panel.setStyleSheet("QFrame { border-left: 1px solid #252930; background-color: #1a1d23; }")
-        panel.setFixedWidth(340)
+        panel.setFixedWidth(600)
         panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         outer = QVBoxLayout()
@@ -429,6 +453,61 @@ class SerialMonitorUI(QMainWindow):
 
         self._connection_widgets += [self.set_all_btn, self.set_default_btn, self.reset_defaults_btn]
         return row + 1
+
+    # -------------------------------------------------------------------------
+    # Programming
+    # -------------------------------------------------------------------------
+
+    def browse_elf_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select ELF File", "", "ELF Files (*.elf);;All Files (*)"
+        )
+        if file_path:
+            self.elf_path_input.setText(file_path)
+            self.program_btn.setEnabled(True)
+
+    def program_device(self):
+        elf_path = self.elf_path_input.text().strip()
+        if not elf_path or not os.path.exists(elf_path):
+            self.statusBar().showMessage("Error: ELF file not found")
+            return
+
+        self.program_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.log_info("Starting programming...")
+        self.statusBar().showMessage("Programming...")
+
+        self._flash_process = QProcess(self)
+        self._flash_process.readyReadStandardOutput.connect(self._on_flash_stdout)
+        self._flash_process.readyReadStandardError.connect(self._on_flash_stderr)
+        self._flash_process.finished.connect(self._on_flash_finished)
+        self._flash_process.start("STM32_Programmer_CLI", ["-c", "port=SWD", "-d", elf_path, "-rst"])
+
+        if not self._flash_process.waitForStarted(3000):
+            self.log_info("Error: STM32_Programmer_CLI not found in PATH")
+            self.statusBar().showMessage("Error: STM32_Programmer_CLI not found in PATH")
+            self.program_btn.setEnabled(True)
+            self.browse_btn.setEnabled(True)
+
+    def _on_flash_stdout(self):
+        output = self._flash_process.readAllStandardOutput().data().decode("utf-8", errors="replace").strip()
+        if output:
+            self.log_info(output)
+
+    def _on_flash_stderr(self):
+        output = self._flash_process.readAllStandardError().data().decode("utf-8", errors="replace").strip()
+        if output:
+            self.log_info(output)
+
+    def _on_flash_finished(self, exit_code, _exit_status):
+        if exit_code == 0:
+            self.log_info("Programming successful!")
+            self.statusBar().showMessage("Programming successful!")
+        else:
+            self.log_info(f"Programming failed (exit code {exit_code})")
+            self.statusBar().showMessage(f"Programming failed (exit code {exit_code})")
+        self.program_btn.setEnabled(True)
+        self.browse_btn.setEnabled(True)
 
     # -------------------------------------------------------------------------
     # Port management
