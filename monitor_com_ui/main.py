@@ -11,6 +11,7 @@ The refactored code is split into modules for better maintainability:
   - config.py: Application configuration constants
 """
 
+import json
 import os
 import sys
 import serial.tools.list_ports
@@ -43,6 +44,16 @@ except ImportError:
     from logger import setup_logging
 
 logger = setup_logging()
+
+_SETTINGS_FILENAME = "program_settings.json"
+
+
+def _get_settings_path():
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, _SETTINGS_FILENAME)
 
 _STYLE_BTN_BLUE = (
     "QPushButton { background-color: #1a3d7a; color: #7ec8f8; border: 1px solid #2d6abf;"
@@ -94,6 +105,7 @@ class SerialMonitorUI(QMainWindow):
 
         self.init_ui()
         self.update_port_list()
+        self._load_program_settings()
 
     # -------------------------------------------------------------------------
     # UI construction
@@ -439,6 +451,24 @@ class SerialMonitorUI(QMainWindow):
     # Programming
     # -------------------------------------------------------------------------
 
+    def _load_program_settings(self):
+        try:
+            with open(_get_settings_path(), "r") as f:
+                data = json.load(f)
+            elf_path = data.get("elf_path", "")
+            if elf_path and os.path.exists(elf_path):
+                self.elf_path_input.setText(elf_path)
+                self.program_btn.setEnabled(True)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    def _save_program_settings(self):
+        try:
+            with open(_get_settings_path(), "w") as f:
+                json.dump({"elf_path": self.elf_path_input.text()}, f, indent=2)
+        except OSError as e:
+            logger.warning("Could not save program settings: %s", e)
+
     def browse_elf_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select ELF File", "", "ELF Files (*.elf);;All Files (*)"
@@ -446,6 +476,7 @@ class SerialMonitorUI(QMainWindow):
         if file_path:
             self.elf_path_input.setText(file_path)
             self.program_btn.setEnabled(True)
+            self._save_program_settings()
 
     def program_device(self):
         elf_path = self.elf_path_input.text().strip()
