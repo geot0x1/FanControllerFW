@@ -15,10 +15,10 @@
 #define CONFIG_SENSOR_TEMP_MIN_CDEG         (-4000)  /* -40.00 °C */
 #define CONFIG_SENSOR_TEMP_MAX_CDEG         (15000)  /* 150.00 °C */
 
-#define CONFIG_TEMP_CRITICAL_DEFAULT        60U   /* °C — overheat shutdown threshold */
-#define CONFIG_TEMP_THROTTLE_ON_DEFAULT     40U   /* °C — PWM throttle engages above this */
-#define CONFIG_TEMP_FAN_ON_DEFAULT          35U   /* °C — fans turn ON above this */
-#define CONFIG_TEMP_FAN_OFF_DEFAULT         30U   /* °C — fans turn OFF below this */
+#define CONFIG_TEMP_CRITICAL_DEFAULT        75U   /* °C — overheat shutdown threshold */
+#define CONFIG_TEMP_THROTTLE_ON_DEFAULT     58U   /* °C — PWM throttle engages above this */
+#define CONFIG_TEMP_FAN_ON_DEFAULT          40U   /* °C — fans turn ON above this */
+#define CONFIG_TEMP_FAN_OFF_DEFAULT         32U   /* °C — fans turn OFF below this */
 
 /* ── PWM throttle defaults ───────────────────────────────────────────────── */
 
