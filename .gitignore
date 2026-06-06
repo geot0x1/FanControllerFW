@@ -69,3 +69,5 @@ wheels/
 venv/
 env/
 ENV/
+
+program_settings.json
