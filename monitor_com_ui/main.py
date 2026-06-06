@@ -11,6 +11,7 @@ The refactored code is split into modules for better maintainability:
   - config.py: Application configuration constants
 """
 
+import html as html_module
 import json
 import os
 import sys
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
     QFrame, QCheckBox, QGridLayout, QLineEdit, QScrollArea, QTableWidget, QTableWidgetItem,
     QMessageBox, QSizePolicy, QFileDialog
 )
-from PyQt6.QtGui import QIntValidator, QColor, QFont
+from PyQt6.QtGui import QIntValidator, QColor, QFont, QTextCursor
 from PyQt6.QtCore import QDateTime, QTimer, Qt, QProcess
 
 try:
@@ -46,6 +47,19 @@ except ImportError:
 logger = setup_logging()
 
 _SETTINGS_FILENAME = "program_settings.json"
+
+
+def _decode_process_bytes(data: bytes) -> str:
+    """Decode subprocess output, handling Windows OEM (CP437) console encoding."""
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode('oem')
+    except (UnicodeDecodeError, LookupError):
+        pass
+    return data.decode('latin-1')
 
 
 def _get_settings_path():
@@ -502,18 +516,18 @@ class SerialMonitorUI(QMainWindow):
             self.browse_btn.setEnabled(True)
 
     def _on_flash_stdout(self):
-        output = self._flash_process.readAllStandardOutput().data().decode("utf-8", errors="replace").strip()
+        output = _decode_process_bytes(self._flash_process.readAllStandardOutput().data()).strip()
         if output:
             self.log_info(output)
 
     def _on_flash_stderr(self):
-        output = self._flash_process.readAllStandardError().data().decode("utf-8", errors="replace").strip()
+        output = _decode_process_bytes(self._flash_process.readAllStandardError().data()).strip()
         if output:
             self.log_info(output)
 
     def _on_flash_finished(self, exit_code, _exit_status):
         if exit_code == 0:
-            self.log_info("Programming successful!")
+            self.log_info("Programming successful!", bold=True)
             self.statusBar().showMessage("Programming successful!")
         else:
             self.log_info(f"Programming failed (exit code {exit_code})")
@@ -806,12 +820,15 @@ class SerialMonitorUI(QMainWindow):
             self.serial_worker.ser.write(f"{command}\r\n".encode())
         self.autoscroll_to_bottom()
 
-    def log_info(self, message: str):
+    def log_info(self, message: str, bold: bool = False):
         """Log a message to the info display with timestamp"""
         timestamp = QDateTime.currentDateTime().toString("hh:mm:ss")
-        log_msg = f"[{timestamp}] {message}\n"
-        current_text = self.info_display.toPlainText()
-        self.info_display.setPlainText(log_msg + current_text if current_text else log_msg)
+        escaped = html_module.escape(f"[{timestamp}] {message}")
+        line_html = f"<b>{escaped}</b><br>" if bold else f"{escaped}<br>"
+        cursor = self.info_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        cursor.insertHtml(line_html)
+        self.info_display.setTextCursor(cursor)
 
     def send_custom_command(self):
         command = self.command_input.text().strip()
