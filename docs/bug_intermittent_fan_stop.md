@@ -1,7 +1,7 @@
 # Bug: Intermittent all-fans-stop on CRITICAL → THROTTLING exit
 
-**Status:** Root cause unconfirmed (requires hardware verification). One defensive
-firmware mitigation applied. Primary suspected cause is electrical, not software.
+**Status:** Root cause unconfirmed — verification pending. No firmware changes
+made. Primary suspected cause is electrical, not software.
 
 ## Symptom
 
@@ -15,7 +15,11 @@ Reported by the user:
 
 Key facts:
 
-- All 4 fan units stop **simultaneously**.
+- All 4 fan units stop **simultaneously** — despite fully independent drive
+  circuits (per-fan TIM1 channel, pin, N-MOSFET, output stage). The only
+  elements shared by all four fans are: TIM1's common control bits
+  (`CEN`/`ARR`/`BDTR.MOE`), the GPIOA port configuration, the 3.3 V
+  gate-drive reference, the fan supply rail, and ground.
 - Telemetry (`$01,...` line, fan bitfield) reports all 4 fans **ON** the entire
   time they are physically stopped.
 - The `FAN_FORCE_EN` push button has no effect while stuck.
@@ -55,7 +59,7 @@ the THROTTLING → HIGH boundary. Ruled out along the way:
   `HAL_GPIO_Init()` call. No shared timer instance, no shared variables, no
   `#include` relationship between the two modules in either direction.
 
-### Structural software gap found (fixed regardless of root cause)
+### Structural software gap found
 
 `fan_control_sequential_open()` (`Application/fan_control/fan_control.c`) is a
 **set-once** state machine: once all 4 channels reach `SeqStateComplete`, every
@@ -70,18 +74,13 @@ self-healing: if TIM1's output-enable state were ever disturbed by anything
 external, nothing would notice or correct it, and even a button press
 wouldn't help (it also just calls the same no-op function).
 
-**Fix applied:** `fan_control.c` now periodically re-arms each channel (via
-`tim_pwm_start()`, which re-enables the channel/MOE, not just the duty
-register) every ~1 s while fans are supposed to be on, even after
-`SeqStateComplete` is reached. This closes the robustness gap and, as a side
-effect, also fixes a related latent bug where `FAN<1-4>=OFF` (USB command)
-could permanently desync a channel from the "should be on" state.
+A related latent bug follows from the same set-once design and is still live:
+`FAN<1-4>=OFF` (USB command) permanently desyncs a channel from the "should be
+on" state, because `apply_fans()` only ever calls the no-op
+`fan_control_sequential_open()` afterwards.
 
-This fix defends against an MCU-register-level disturbance (e.g. TIM1's shared
-`BDTR.MOE` bit — a single point that, if cleared, would explain all 4 channels
-dying together instantly). It does **not** address a fault that lives entirely
-downstream of the MCU (external gate driver / motor stage), if that turns out
-to be the real mechanism — see below.
+No firmware change has been made for either issue — verification of the root
+cause comes first.
 
 ## Leading hypothesis: LCD backlight PWM dimming as a shared-rail noise source
 
@@ -117,28 +116,48 @@ backlight dimming signal (`"BJT on output inverts: PA0 HIGH → LCD_PWM LOW"`,
 
 ### The mechanism
 
-At THROTTLING, the backlight's dimming PWM is actively duty-cycling — its
-driver/boost stage is being repeatedly switched on and off at the dimming
-frequency, and **every on-edge is its own small inrush event**, recurring
-continuously for the entire THROTTLING dwell. At 100% duty (HIGH/LOW thermal
-states), the dimming PWM is effectively DC — the driver runs continuously with
-no more repeated on/off transients.
+Important clarification: `DIM_PWM` is a **logic-level control signal**, not a
+power line. The signal itself carries no meaningful energy. The hypothesis
+therefore depends entirely on how the LCD module's backlight driver implements
+dimming:
+
+- **Direct PWM dimming** (the common implementation): the driver chops the
+  actual backlight LED current on/off at the dim frequency, following the
+  signal 1:1. At THROTTLING (~50%), the LCD module's supply current is then a
+  pulsed load at 160 Hz — **every on-edge is its own small inrush event**,
+  recurring continuously for the entire THROTTLING dwell. At 100% duty
+  (HIGH/LOW thermal states) the LED current is DC and the repeated transients
+  stop. In this case the mechanism below holds, with the aggressor being the
+  LCD module's supply current (through Q18), not the signal trace.
+- **Analog dimming** (driver filters the PWM into a brightness level): the LED
+  current is smooth at any duty, there is no chopped load, and this entire
+  hypothesis is **dead** — the observed correlation would need a different
+  explanation.
+
+The state pattern itself argues that only the chopped-load version can be
+right, if any: fans run fine in CRITICAL (LCD fully off — zero load) and fine
+in HIGH (100% dim — *maximum* average load), failing only at ~50%. No
+average-load/undersized-rail story fits that; only something unique to
+intermediate duty — chopping/ripple — does.
 
 If the fan supply or gate-drive rail shares any common point with the
 backlight driver's rail (common bulk capacitor, common regulator, common
 return path), this single mechanism explains every observed symptom together:
 
-1. **All 4 fans die together** — a shared rail disturbance hits all 4 fan
-   channels' power stage at once, independent of TIM1's per-channel PWM
+1. **All 4 fans die together** — the four drive circuits are independent
+   (own TIM1 channel, own pin, own N-MOSFET), so if each fan stalled
+   independently with probability *p*, all four together would occur at
+   ~*p*⁴ — effectively never. Simultaneity forces a single common-point
+   event deep enough to take out every fan when it occurs — a shared
+   rail/reference disturbance, independent of TIM1's per-channel PWM
    signals (which stay correct the whole time — matching telemetry).
 2. **Telemetry stays "ON" throughout** — the fault is entirely downstream of
    the MCU's TIM1 CCR register, which this mechanism never touches.
-3. **~1-in-100 rarity** — not a single rare digital glitch, but a statistical
-   threshold: whether the cumulative rail ripple during a given THROTTLING
-   dwell happens to be deep/long enough, at a moment a fan is vulnerable
-   (e.g. mid-commutation on a 2-wire fan with no hall feedback), to actually
-   stall it — rather than the more common case where fans just tolerate the
-   ripple.
+3. **~1-in-100 rarity** — the randomness lives in the *common* event, not in
+   per-fan vulnerability (per-fan randomness could not produce simultaneity):
+   whether the rail/reference disturbance during a given THROTTLING dwell
+   happens to reach the depth/duration needed to take the fans out, versus
+   the common case where it stays within what they tolerate.
 4. **Reliable recovery exactly at THROTTLING → HIGH** — once duty hits 100%,
    the repeated on/off transients simply **stop occurring** — not because
    anything gets reset or re-enabled, but because the disturbance source no
@@ -146,19 +165,38 @@ return path), this single mechanism explains every observed symptom together:
    and restarts on its own. This is why recovery is deterministic and
    immediate at that specific transition rather than "eventually, by luck."
 
+The coupling path does not have to be the fan supply rail itself. The
+N-MOSFET gates are driven directly from TIM1 pins at a constant 3.3 V (100%
+duty = pin statically high), so V_GS of all four FETs rides on the difference
+between the MCU's 3.3 V/ground and the power stage's source/ground. A chopped
+LCD load current returning through a shared ground segment would bounce that
+reference at 160 Hz for all four FETs at once — partially de-enhancing every
+fan MOSFET simultaneously without the fan supply rail ever sagging. 3.3 V
+gate drive typically has little enhancement margin, so a ~1 V reference
+shift is already significant. This variant requires only a shared ground
+return, a much weaker schematic precondition than a shared supply rail.
+
 This also explains why an MOE-register theory (all 4 channels sharing one
 enable bit inside the MCU) is a weaker fit on its own: nothing in the
-*original* (pre-fix) firmware ever re-armed TIM1 after boot, so a
-register-level fault would have stayed stuck until fans were explicitly
-cycled off/on — it would not have self-healed exactly at the HIGH transition
-the way the backlight-PWM mechanism naturally does.
+firmware ever re-arms TIM1 after boot, so a register-level fault would stay
+stuck until fans were explicitly cycled off/on — it would not self-heal
+exactly at the HIGH transition the way the backlight-PWM mechanism naturally
+does. Broad GPIOA corruption (MODER/AFR) is similarly disfavored: PA0/PA1
+(dim output) and PA6/PA7 (I2C — HDC2010) share the same port. Confirming
+that HDC2010 values stay valid in telemetry during a stuck window would rule
+port-wide corruption out entirely.
 
 ### Caveat
 
-This requires the fan supply/gate-drive rail to actually share some physical
-point with the backlight driver's rail — that's a schematic-level fact, not
-something derivable from the firmware repo. It has not been confirmed with a
-scope or debugger.
+This requires two schematic/module-level facts that are not derivable from the
+firmware repo and have not been confirmed with a scope or debugger:
+
+1. The LCD module's backlight driver must do **direct PWM dimming** (chopped
+   LED current), not analog dimming.
+2. The fan drive path must share some physical point with the LCD load —
+   either the supply side (common bulk capacitor, common regulator) or merely
+   the return side (LCD load current flowing through a ground segment shared
+   with the fan MOSFET sources / MCU ground reference).
 
 ## Suggested verification (no firmware change required)
 
@@ -171,21 +209,20 @@ the fan side.
 
 Hardware-level confirmation, if available:
 
+- **Most decisive single measurement:** scope the LCD supply rail (downstream
+  of Q18) during a THROTTLING dwell at ~50% dim. If the LCD's supply
+  current/voltage is **not** chopped at 160 Hz, the module does analog dimming
+  and the entire backlight hypothesis is ruled out. If it is chopped, the
+  pulsed-load mechanism is real and the remaining question is only whether it
+  couples into the fan rail.
 - Scope PB15 (LCD power) and the backlight dimming output (PA0/PA1) together
   with the fan supply/gate-drive rail during a THROTTLING dwell, looking for
   ripple/sag correlated with each dimming PWM edge.
+- For the ground-bounce variant: measure a fan MOSFET's V_GS directly at the
+  FET (gate to source pin, not to MCU ground) during a THROTTLING dwell —
+  160 Hz dips in V_GS with the fan supply rail steady would confirm a shared
+  ground return as the coupling path.
 - If a debugger can stay attached through a live reproduction, inspect
   `TIM1->BDTR` / `TIM1->CCER` at the moment fans are reported stuck — this
   would immediately confirm or rule out the MCU-register (MOE) explanation
   versus a purely downstream/analog one.
-
-## If confirmed: fix direction
-
-The mitigation already applied (periodic TIM1 re-arm in `fan_control.c`) is
-worth keeping regardless — it closes a real self-healing gap and an unrelated
-`FAN=OFF` command bug — but it does not address a downstream/analog fault. If
-the shared-rail/backlight-PWM mechanism is confirmed, the actual fix is
-hardware-side: separate or better-decouple the fan power/gate-drive rail from
-the backlight driver's rail, add bulk capacitance at the point of common
-coupling, or soften/slow the backlight dimming PWM's transition rate to
-reduce the repeated inrush during THROTTLING.
