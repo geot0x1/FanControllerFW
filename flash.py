@@ -51,7 +51,7 @@ def main():
 
     # Create temporary JLink script
     jlink_script = tempfile.NamedTemporaryFile(mode='w', suffix='.jlink', delete=False)
-    jlink_script.write("device STM32C071\n")
+    jlink_script.write("device STM32C071RB\n")
     jlink_script.write("if SWD\n")
     jlink_script.write("speed auto\n")
     jlink_script.write(f"loadfile {elf_path}\n")
