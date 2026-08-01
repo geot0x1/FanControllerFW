@@ -15,7 +15,7 @@ static struct
     bool enabled;
     SimState state;
     millis_t state_start_ms;
-} sim_ctx = {.enabled = true, .state = SimStateCritical, .state_start_ms = 0};
+} sim_ctx = {.enabled = false, .state = SimStateCritical, .state_start_ms = 0};
 
 /* Temperature values in centidegrees for each state */
 static const int16_t sim_temps[] = {
@@ -29,7 +29,7 @@ static const int16_t sim_temps[] = {
 
 void temp_simulator_init(void)
 {
-    sim_ctx.enabled = false;
+    sim_ctx.enabled = true;
     sim_ctx.state = SimStateCritical;
     sim_ctx.state_start_ms = millis();
 }
