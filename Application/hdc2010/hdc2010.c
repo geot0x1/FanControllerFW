@@ -1,6 +1,7 @@
 #include "hdc2010.h"
 #include "config.h"
 #include "sys_time.h"
+#include "temp_simulator.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -167,6 +168,12 @@ Hdc2010Err hdc2010_read(Hdc2010 *dev, int16_t *temperature_cdeg, uint8_t *humidi
 
 int16_t hdc2010_get_temp(void)
 {
+    int16_t sim_temp = temp_simulator_get();
+    if (sim_temp != INT16_MIN)
+    {
+        return sim_temp;
+    }
+
     if (!cached_valid)
     {
         return INT16_MIN;

@@ -4,6 +4,7 @@ import sys
 import os
 import glob
 import json
+import tempfile
 
 def find_elf(build_dir):
     # Try finding via build_info.json first
@@ -46,17 +47,19 @@ def main():
     build_dir = "build"
     elf_path = find_elf(build_dir)
 
-
-
     print(f"Found ELF file: {elf_path}")
 
-    # Flash command as specified by the user
-    cmd = [
-        "STM32_Programmer_CLI",
-        "-c", "port=SWD",
-        "-d", elf_path,
-        "-rst"
-    ]
+    # Create temporary JLink script
+    jlink_script = tempfile.NamedTemporaryFile(mode='w', suffix='.jlink', delete=False)
+    jlink_script.write("device STM32C071\n")
+    jlink_script.write("if SWD\n")
+    jlink_script.write("speed auto\n")
+    jlink_script.write(f"loadfile {elf_path}\n")
+    jlink_script.write("r\n")
+    jlink_script.write("exit\n")
+    jlink_script.close()
+
+    cmd = ["JLink", "-commandfile", jlink_script.name]
 
     print(f"Executing: {' '.join(cmd)}")
     try:
@@ -65,15 +68,17 @@ def main():
         for line in process.stdout:
             print(line, end="")
         process.wait()
-        
+
+        os.unlink(jlink_script.name)
+
         if process.returncode != 0:
             print(f"\nError: Flashing failed with code {process.returncode}")
             sys.exit(process.returncode)
         else:
             print("\nFlashing successful!")
     except FileNotFoundError:
-        print("\nError: 'STM32_Programmer_CLI' not found in PATH.")
-        print("Please ensure STM32CubeProgrammer is installed and added to your System PATH.")
+        print("\nError: 'JLink' not found in PATH.")
+        print("Please ensure JLink is installed and added to your System PATH.")
         sys.exit(1)
 
 if __name__ == "__main__":

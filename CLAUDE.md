@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 python build.py          # CMake configure + Ninja build (Debug)
 python build.py --clean  # Clean then build
-python flash.py          # Flash via STM32_Programmer_CLI over SWD
+python flash.py          # Flash via JLink over SWD
 python run.py            # Build then flash in sequence
 ```
 
 Toolchain: `gcc-arm-none-eabi`, CMake + Ninja. The build reads `cmake/gcc-arm-none-eabi.cmake` and writes artifacts to `build/`.
 
-Flash requires `STM32_Programmer_CLI` on PATH (STM32CubeProgrammer). The ELF path is resolved from `build/build_info.json`.
+Flash requires `JLink` on PATH (JLink software from SEGGER). The ELF path is resolved from `build/build_info.json`.
 
 ## Off-Limits Directories
 
