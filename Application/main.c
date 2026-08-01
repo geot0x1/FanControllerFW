@@ -13,6 +13,7 @@
 #include "sys_time.h"
 #include "system_temp.h"
 #include "telemetry.h"
+#include "temp_simulator.h"
 #include "thermal_control.h"
 #include "temperature_sensor.h"
 #include "timers/timers.h"
@@ -219,6 +220,7 @@ int main(void)
     board_onewire_power_set(true);
     board_onewire_pullup_set(true);
     temperature_sensor_init();
+    temp_simulator_init();
 
     fan_control_init(timers_get_fan_power(), timers_get_fan_remote());
     fan_init(APP_FAN_PWM_FREQ_HZ);
