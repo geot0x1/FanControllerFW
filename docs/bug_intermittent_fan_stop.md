@@ -3,6 +3,121 @@
 **Status:** Root cause unconfirmed — verification pending. No firmware changes
 made. Primary suspected cause is electrical, not software.
 
+## System overview
+
+**MCU:** STM32C071CBT6 (48-pin LQFP, Cortex-M0+), per the schematic
+(`mcu.SchDoc`, IC1) and its 48-pin net list. `flash.py` previously told
+JLink `device STM32C071RB` (the 64-pin variant) — corrected to
+`STM32C071CB`. Bare-metal, no RTOS — a cooperative `while(true)` loop in
+`main.c`, with TIM2 input capture as the only interrupt driving application
+logic.
+
+**Power rails:** Main input is **+VIN, 24 V**, reverse-polarity protected by
+a P-FET (Q5) ahead of a buck regulator (`psu.SchDoc`, AP64060WU) producing
+**+3V3** for the MCU/logic. A separate buck regulator (`gate_driver_psu.SchDoc`,
+SSP7903P12PR) drops +VIN down to a **+12V** rail dedicated to the fan
+gate-driver ICs. The LCD module and the fans themselves are both powered
+directly from the raw **24 V** rail — the LCD through a switched P-FET load
+switch (Q4, gated by NPN Q18 off `LCD_PWR_EN`/PB15), the fans permanently
+(only their return path is switched, see Drive stage below).
+
+**Fans:** 4 independent units, wired through 4-pin connectors (J5–J8) that
+carry `+VIN` (24 V), the switched return (`MOS_OUTn`), a tach line
+(`FAN_TACHOn`), and an open-collector control/PWM line (`FAN_CTRL_PWMn`) —
+i.e. the connector and drive hardware fully support 3/4-wire fans. Firmware
+does not use that capability today: `fan_control_init()` **forces all 4
+units into 2-wire mode** regardless of the DIP-switch (PD0–PD3) reading
+(`Application/fan_control/fan_control.c`, `_fan_types[i] = FanType2Wire`),
+so in the currently-shipped configuration only the switched power leg
+(`MOS_OUTn`) is used for speed control; `FAN_CTRL_PWMn`/`FAN_TACHOn` are
+wired but not driven/read by this firmware build.
+
+**Speed control is not proportional PWM in practice.** TIM1 generates a
+real variable-duty PWM signal in hardware, but the only two duty values ever
+commanded at runtime are **0% (off)** and **100% (on)** —
+`fan_control_all_off()` sets 0%, and `fan_control_sequential_open()` (the
+only path that turns fans on) always commands `DC = 100`. There is currently
+no code path that drives an intermediate duty cycle for fan speed. So today
+the "PWM" output is functionally a binary on/off switch, not a speed
+controller.
+
+**Drive stage:** each TIM1 channel (`FAN_PWR_PWMn`, 3.3 V logic) feeds a
+**dedicated low-side gate-driver IC** (UCC27517DBVR, one per fan, IC6–IC9),
+powered from the +12V gate-driver rail — not the MCU pin driving the FET
+gate directly. Each driver's output drives an **N-channel MOSFET**
+(Q6–Q9) through a 10 Ω gate resistor, with a 10 kΩ gate pull-down for
+fail-safe off if the driver output is undriven. The MOSFET switches the
+fan's return path to ground (`MOS_OUTn`, low-side switching) while `+VIN`
+(24 V) stays permanently connected to the fan's positive terminal. 100%
+duty holds the driver output — and FET gate — statically high (fully
+enhanced, fan grounded continuously); 0% holds it low (fan floating/off).
+The `FAN_PWR_PWM` input to each driver also has its own 10 kΩ pull-down
+directly off the MCU trace, independent of the driver-side pull-down.
+
+**Temperature sensing:** `system_temp_get()` reports
+`max(DS18B20_reading, HDC2010_reading)` in firmware, but on this board
+**the DS18B20 (1-Wire, PB4/PB5/PB8) is not populated/used** — the HDC2010
+(I2C2) is the only sensor actually present. The DS18B20 code path exists and
+will return `INT16_MIN` (sensor-lost) permanently on this hardware, which
+`system_temp_get()`'s `max()` logic correctly falls back around.
+
+## State machine
+
+Two independent state enums drive every output decision in `main.c`:
+
+- **`SystemState`** — `SystemBoot` → `SystemRunning` ↔ `SystemFault`.
+  `SystemFault` is entered if the temperature sensor(s) are unreadable
+  (`system_temp_get() == INT16_MIN`) either at boot (after a 10 s timeout)
+  or during running; it's exited back to `SystemRunning` as soon as a valid
+  reading returns.
+- **`ThermalState`** — `ThermalLow` → `ThermalHigh` → `ThermalThrottling` →
+  `ThermalCritical`, each with its own temperature threshold from
+  `Settings` and independent hysteresis on the way back down
+  (`Application/thermal_control/thermal_control.c`):
+  - `ThermalLow → ThermalHigh` at `temp_fan_on`, back down at `temp_fan_off`.
+  - `ThermalHigh → ThermalThrottling` at `temp_throttle_on`, back down 2 °C
+    below that (`THROTTLE_HYSTERESIS_DEG`).
+  - `ThermalThrottling → ThermalCritical` at `temp_critical`, back down 2 °C
+    below that (`CRITICAL_HYSTERESIS_DEG`).
+  - Critical can only step back down to Throttling, never straight to High —
+    every drop passes through Throttling first.
+
+`app_task()` (`main.c`) calls `thermal_control_step()` once per loop
+iteration, then maps the combined `(SystemState, ThermalState)` pair to fan
+power, PWM throttle caps on the external repeater signal, LCD power, and the
+program LED pattern — see `apply_fans()`, `apply_throttle()`,
+`apply_lcd_power()`, `apply_program_led()`. Fans are commanded on for
+`ThermalHigh`, `ThermalThrottling`, and `ThermalCritical` alike, and off only
+for `ThermalLow` (or by the front-panel button).
+
+### What the device does in each `ThermalState` (while `SystemRunning`)
+
+| State | Fans (`apply_fans`) | External PWM repeater throttle cap (`apply_throttle`) | LCD power (`apply_lcd_power`) | Program LED (`apply_program_led`) |
+|---|---|---|---|---|
+| `ThermalLow` | Off — `fan_control_all_off()` (unless the front-panel button is held) | Forced to 100% (`pwm_set_throttle_a/b(100)`) — irrelevant while fans are off, but the repeater output itself is not gated by fan state | On | `ProgramLedLow` |
+| `ThermalHigh` | On, full speed — `fan_control_sequential_open()` staggers the 4 units on 500 ms apart, each commanded to 100% duty (see "Speed control is not proportional PWM" above) | 100% — no throttling of the external PWM signal | On | `ProgramLedHigh` |
+| `ThermalThrottling` | On, same as `ThermalHigh` — fan drive itself is not reduced in this state | Capped to `settings->pwm_throttle_a/b` (configurable, default ~50%) — this throttles the *external* signal repeated out on PA0/PA1, e.g. dimming the LCD backlight or throttling another connected load, not the fans | On | `ProgramLedThrottling` |
+| `ThermalCritical` | On, same as above — fans are **not** turned off in Critical; `auto_on` includes Critical | Forced to 0% — the external PWM output is fully cut | **Off** — the only state where the LCD is powered down | `ProgramLedCritical` |
+
+Two things worth calling out explicitly since they're easy to misread from
+the state names:
+
+- **"Throttling" throttles the external repeater PWM signal (`pwm_repeater`,
+  PA0/PA1) — it does not reduce fan speed.** Fan drive is binary (on/off,
+  see above) and is commanded identically across High/Throttling/Critical.
+  The name refers to what's being throttled downstream (LCD backlight /
+  external load), not the fans.
+- **Fans stay on through `ThermalCritical`.** Only the LCD and the external
+  PWM output are cut in Critical — cooling is expected to remain maximal
+  precisely when the system is hottest. This is also why `apply_fans()`'s
+  `auto_on` set includes Critical, which matters for the bug below: fan
+  drive state is never touched across the entire Critical → Throttling →
+  High excursion.
+
+When `SystemState` is `SystemFault` (sensor lost), fans are forced on
+unconditionally (`fans_on = ... || (state == SystemFault)`) regardless of
+`ThermalState`, the LCD is off, and the program LED shows `ProgramLedError`.
+
 ## Symptom
 
 Reported by the user:
@@ -109,10 +224,15 @@ Simultaneously, `apply_throttle()` steps the `pwm_repeater` output
 backlight dimming signal (`"BJT on output inverts: PA0 HIGH → LCD_PWM LOW"`,
 `"DIM_PWM"` — `pwm_repeater.c`):
 
-| Transition | LCD power (PB15/Q18) | Backlight dimming PWM duty |
+| Transition | LCD power (PB15 → Q18 → Q4 load switch, on +VIN 24 V) | Backlight dimming PWM duty |
 |---|---|---|
 | CRITICAL → THROTTLING | OFF → ON (inrush) | 0% → `settings->pwm_throttle_a/b` (default ~50%) |
 | THROTTLING → HIGH | already ON, no change | ~50% → 100% |
+
+(Per the schematic: `LCD_PWR_EN`/PB15 drives NPN Q18, which pulls the gate
+of P-FET Q4 low to turn it on — Q4 is the actual high-side load switch
+connecting `+VIN` to `+PWR_OUT`, the LCD module's 24 V supply. Q18 itself
+carries only gate-drive current, not the LCD's load current.)
 
 ### The mechanism
 
@@ -165,16 +285,27 @@ return path), this single mechanism explains every observed symptom together:
    and restarts on its own. This is why recovery is deterministic and
    immediate at that specific transition rather than "eventually, by luck."
 
-The coupling path does not have to be the fan supply rail itself. The
-N-MOSFET gates are driven directly from TIM1 pins at a constant 3.3 V (100%
-duty = pin statically high), so V_GS of all four FETs rides on the difference
-between the MCU's 3.3 V/ground and the power stage's source/ground. A chopped
-LCD load current returning through a shared ground segment would bounce that
-reference at 160 Hz for all four FETs at once — partially de-enhancing every
-fan MOSFET simultaneously without the fan supply rail ever sagging. 3.3 V
-gate drive typically has little enhancement margin, so a ~1 V reference
-shift is already significant. This variant requires only a shared ground
-return, a much weaker schematic precondition than a shared supply rail.
+The coupling path does not have to be the 24 V fan supply rail itself.
+Correction from schematic review: the fan MOSFET gates are **not** driven
+directly by TIM1 pins — each channel has its own dedicated low-side gate
+driver IC (UCC27517, IC6–IC9) powered from a separate **+12 V gate-driver
+rail** (`gate_driver_psu.SchDoc`, regulated down from +VIN by IC5). 100%
+duty holds each driver's output — and the corresponding FET gate — at a
+solid ~12 V, which gives far more V_GS enhancement margin than a bare 3.3 V
+MCU pin would; a "3.3 V has little margin" version of this argument is
+**not supported by the actual circuit** and is retracted. The viable
+version of a reference-bounce mechanism has to act on the shared **+12 V
+gate-driver rail or its return**, not on 3.3 V logic: since all four
+UCC27517 drivers share the same +12 V supply (`+12V`, C18–C27 decoupling)
+and the same ground plane as the LCD load switch and fan return paths, a
+chopped LCD load current returning through a shared ground segment, or
+loading the shared +12 V rail, would affect all four drivers' output high
+level at once — potentially enough to reduce (not necessarily lose) FET
+enhancement simultaneously across all 4 channels. This is a weaker
+mechanism than the bare-3.3 V-gate version originally proposed, since 12 V
+gate drive has more headroom to absorb a disturbance before a MOSFET
+meaningfully de-enhances, and should be weighted accordingly during
+verification.
 
 This also explains why an MOE-register theory (all 4 channels sharing one
 enable bit inside the MCU) is a weaker fit on its own: nothing in the
