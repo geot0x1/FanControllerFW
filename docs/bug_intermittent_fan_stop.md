@@ -226,3 +226,31 @@ Hardware-level confirmation, if available:
   `TIM1->BDTR` / `TIM1->CCER` at the moment fans are reported stuck — this
   would immediately confirm or rule out the MCU-register (MOE) explanation
   versus a purely downstream/analog one.
+
+## 2026-08-11 review notes
+
+Additional notes from a follow-up static-analysis pass over the same
+symptom, recorded for comparison against the leading hypothesis above.
+
+- Confirms the two structural code facts this doc relies on:
+  `apply_fans()` treats CRITICAL/THROTTLING/HIGH identically (fans are
+  never re-commanded across that whole window), and no runtime code path
+  ever calls `tim_pwm_start()`/`fan_power_init()` again after boot.
+- Considered and **rejects** a TIM1 register/clock corruption theory (e.g.
+  via BKIN noise or a supply brownout clearing `CEN`/`MOE`). This is the
+  "MOE-register theory" already disfavored above: a register-level fault
+  would stay latched until fans were cycled rather than self-heal exactly
+  at THROTTLING → HIGH, and CCR would no longer read back correctly —
+  contradicting the telemetry fact that `get_fan_state_str()` reads the
+  live `__HAL_TIM_GET_COMPARE` register, not a software flag. It also
+  doesn't explain why all 4 independent channels fail together.
+- Independently corroborates the shared-rail / LCD-power-switch
+  correlation (`BOARD_LCD_PWR_EN` / PB15 turning on exactly at
+  CRITICAL→THROTTLING) as the most plausible lead, consistent with the
+  backlight dimming chopped-load mechanism already documented above —
+  which is the piece that explains why HIGH (100% dim, steady load) is
+  safe while THROTTLING (~50% dim, chopped load) is not, and CRITICAL (LCD
+  off, zero load) is also safe.
+
+No firmware change has been made as a result of this pass. The chopped-load
+dimming hypothesis and verification plan above remain the standing lead.
